@@ -1,0 +1,529 @@
+---
+title: 'MACS 30200: Problem Set 3'
+author: "Dongping Zhang"
+date: "5/15/2017"
+output: html_document
+---
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+```
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(forcats)
+library(broom)
+library(modelr)
+library(stringr)
+library(ISLR)
+library(titanic)
+library(rcfss)
+library(haven)
+library(lmtest)
+library(car)
+library(Amelia)
+library(forcats)
+library(RColorBrewer)
+library(GGally)
+library(dplyr)
+
+
+options(digits = 3)
+set.seed(1234)
+theme_set(theme_minimal())
+setwd("~/Google Drive/spring2017/macs30200/MACS30200proj/ProblemSets/PS3/")
+```
+
+# Part I. Regression diagnostics
+
+__0. Estimate the following linear regression model of attitudes towards Joseph Biden:__
+$$Y = \beta_0 + \beta_1X_1 + \beta_2X_2 + \beta_3X_3$$
+__where Y is the Joe Biden feeling thermometer, X1 is age, X2 is gender, and X3 is education. Report the parameters and standard errors.__
+
+* Load the biden dataset, clean missing values, and process variables
+```{r load biden dataset}
+biden_df = read.csv("biden.csv") %>% 
+  na.omit() %>%
+  mutate(dem = factor(dem),
+         rep = factor(rep))
+```
+
+* Run a regression of `age`, `gender` and `education` on `feeling thermometer score`
+```{r simple ols on biden}
+biden_lm <- lm(biden ~ age + female + educ, data = biden_df)
+```
+
+* Report the OLS regression model
+```{r report regression model on biden}
+tidy(biden_lm)
+```
+The parameters and standard errors of the model are listed in the regression table above. As we can see from the p-values, except coefficient for the `age` variable, all coefficients are statistically significant at 5% significance level. 
+
+__1. Test the model to identify any unusual and/or influential observations. Identify how you would treat these observations moving forward with this research. Note you do not actually have to estimate a new model, just explain what you would do. This could include things like dropping observations, respecifying the model, or collecting additional variables to control for this influential effect.__
+
+* adding key statistics: leverage, discrepancy, and influence
+```{r adding key statistsics to get unusual/influential observations}
+biden_augment = biden_df %>%
+  mutate(hat = hatvalues(biden_lm),  # leverage (hat) statistics
+         student = rstudent(biden_lm), # measuring discripancy
+         cooksd = cooks.distance(biden_lm)) # measuring influence
+```
+
+* Pick out the problematics:
+    + For leverages statistics, anything exceeding twice the average is noteworthy
+    ```{r set leverage benchmark}
+    hat_benchmark = 2 * mean(biden_augment$hat)
+    ```
+    + For discrepancy statistics, anything outside of the range [-2,2] is discrepant
+    + For influence statistics, Cook's D greater than $\frac{4}{n - k - 1}$ is influential
+    ```{r set influence benchmark}
+    cooksd_benchmark = 4 / (nrow(biden_augment) - (length(coef(biden_lm)) - 1) - 1)
+    ```
+    + Pickout the problematic obs
+    ```{r pick out the problematic}
+    problematics = biden_augment %>%
+    filter(hat > hat_benchmark |
+           abs(student) > 2 |
+           cooksd > cooksd_benchmark)
+    ```
+
+* For the sake of plotting, need to add a `diagonistic` column to the `problematics` dataframe created above
+```{r create the diagnostic}
+diaganostic = c()
+for (i in 1:nrow(problematics)){
+  if(problematics[i,]$hat > hat_benchmark){
+    problem = 'high leverage'
+  }
+  if(abs(problematics[i,]$student) > 2){
+    problem = 'high discrepancy'
+  }
+  if(problematics[i,]$cooksd > cooksd_benchmark){
+    problem = 'high influence'
+  }
+  if (problematics[i,]$hat > hat_benchmark & 
+      abs(problematics[i,]$student) > 2){
+    problem = 'high leverage, high discrepancy'
+  }
+  if (problematics[i,]$hat > hat_benchmark & 
+      problematics[i,]$cooksd > cooksd_benchmark){
+    problem = 'high leverage, high influence'
+  }
+  if (abs(problematics[i,]$student) > 2 & 
+      problematics[i,]$cooksd > cooksd_benchmark){
+    problem = 'high discrepancy, high influence'
+  }
+  if (problematics[i,]$hat > hat_benchmark & 
+      abs(problematics[i,]$student) > 2 & 
+      problematics[i,]$cooksd > cooksd_benchmark){
+    problem = 'high leverage, high discrepancy, \nhigh influence'
+  }  
+  diaganostic = c(diaganostic, problem)
+}
+
+# append it to the dataframe problematic
+problematics = problematics %>%
+  mutate(problem = factor(diaganostic))
+```
+
+* visualizing leverage, discrepancy, and influence by a "bubble plot"
+```{r visualizing leverage, discrepancy, and influence}
+ggplot(problematics, aes(hat, student)) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  geom_hline(yintercept = 2, linetype = 3, color = 'red') +
+  geom_hline(yintercept = -2, linetype = 3, color = 'red') +
+  geom_vline(xintercept = hat_benchmark, linetype = 3, color = 'blue') +
+  geom_point(aes(size = cooksd, color = problem), shape = 1) +
+  scale_size_continuous(range = c(1, 50)) +
+  labs(title = "Bubble Plot of Problematic Observations",
+       x = "Leverage",
+       y = "Studentized residual") + 
+  scale_size(guide = "none") + 
+  theme(legend.position="bottom")
+```
+
+* To find a solution dealing with those problematic obs, aggregate those problematic points with other variables to see if there are any potential patterns
+    + identify all problematic points
+    ```{r identify problatics}
+    for (i in 1:nrow(biden_augment)){
+      if(biden_augment[i,]$hat > hat_benchmark | 
+         abs(biden_augment[i,]$student) > 2 | 
+         biden_augment[i,]$cooksd > cooksd_benchmark){
+          biden_augment$problem[i] = "Yes"
+        }else{
+          biden_augment$problem[i] = "No"
+        }
+    }
+    biden_augment$problem = factor(biden_augment$problem)
+    biden_augment$female = factor(biden_augment$female)
+    ```
+    
+    + Start plotting
+    ```{r plotting the problematic}
+    # biden
+    ggplot(biden_augment, aes(biden)) + 
+      geom_histogram(aes(color = problem, fill = problem), 
+                     binwidth = 20, alpha = 0.3) +
+      labs(title = "Counts of biden variable by Influential obs.")
+    
+    # age
+    ggplot(biden_augment, aes(age)) + 
+      geom_histogram(aes(color = problem, fill = problem), 
+                     binwidth = 10, alpha = 0.3) +
+      labs(title = "Counts of Age variable by Influential obs.")
+    
+    # female
+    ggplot(biden_augment, aes(female)) + 
+      geom_bar(aes(color = problem, fill = problem), 
+                     stat = "count", alpha = 0.3) +
+      labs(title = "Counts of female variable by Influential obs.")
+    
+    # educ
+    ggplot(biden_augment, aes(educ)) + 
+      geom_histogram(aes(color = problem, fill = problem), 
+                     binwidth = 3, alpha = 0.3) +
+      labs(title = "Counts of educ variable by Influential obs.")
+  
+    # party
+    for (i in 1:nrow(biden_augment)){
+      if (biden_augment[i,]$dem == 1){
+        biden_augment$party[i] = 'dem'
+      }else if(biden_augment[i,]$rep == 1){
+        biden_augment$party[i] = 'rep'
+      }else{
+        biden_augment$party[i] = 'other'
+      }
+    }
+    biden_augment$party = factor(biden_augment$party)
+    ggplot(biden_augment, aes(party)) + 
+      geom_bar(aes(color = problem, fill = problem), 
+                     stat = "count", alpha = 0.3) +
+      labs(title = "Counts of dem variable by Influential obs.")
+    ```
+
+In conclusion, according to the variable aggregation plots above, it is diffcult to detect any potential data anomalies from data collection process. On the other hand, we are able to see that unusual observation are more likely to occur to individuals with low biden thermometer score, older males who received lower education (percentage wise), and people who are republicans. To treat those unusual observations and to move forward, I would add a party predictor to the model so as to indicate party affiliation. At the same time, selected interaction terms among `female`, `educ`, and `age` should also be included in the model in order to account for potential interaction effect. 
+
+__2. Test for non-normally distributed errors. If they are not normally distributed, propose how to correct for them.__
+
+* Plot a quantile-comparison plot and assess violation of constant variance by graphical interpretation
+```{r detect non-normally distributed errors}
+car::qqPlot(biden_lm)
+```
+
+The dashed lines indicate 95% confidence intervals calculated under the assumption that the errors are normally distributed, and if any observations fall outside of this range, it would be an indication of violation of constant variance assumption. Clearly, assumption of constant variance is violated.
+
+* To get a degree of residual skewness, plot a density plot of the studentized residuals
+```{r residual skewness1}
+augment(biden_lm, biden_df) %>%
+  mutate(.student = rstudent(biden_lm)) %>%
+  ggplot(aes(.student)) +
+  geom_density(adjust = .5) +
+  labs(x = "Studentized residuals",
+       y = "Estimated density")
+```
+
+From the density plot of the studentized residuals, we can also see that the residuals are negatively skewed.
+
+* Use box-cox to get a sense of suitable transformation, and from the plot below, a power transformation of 1.2 might be working the best
+```{r log transformation}
+biden_lm2 = lm(biden + 1 ~ age + female + educ, data = biden_df)
+boxCox(biden_lm2)
+```
+
+* Use power transformation to see potential improvement
+```{r power transformation for constant variance}
+biden_lm3 = lm(biden^1.2 ~ age + female + educ, data = biden_df)
+car::qqPlot(biden_lm3)
+```
+
+* check residual skewness again
+```{r residual skewness2}
+augment(biden_lm3, biden_df) %>%
+  mutate(.student = rstudent(biden_lm3)) %>%
+  ggplot(aes(.student)) +
+  geom_density(adjust = .5) +
+  labs(x = "Studentized residuals",
+       y = "Estimated density")
+```
+
+According to the pairs of plots below, after power transformation, the standarized residuals are still negatively skewed but looked definitely much better. However, there is no guarantee that the assumption of constant variance would be completely reached, however, using box-cox to get a sense of transformation should always be the priority method. 
+
+__3. Test for heteroscedasticity in the model. If present, explain what impact this could have on inference.__
+
+* Visually assess heteroscedasticity by residual-predicted value plot
+```{r residual predicted value plot}
+biden_df %>%
+  select(-c(dem, rep)) %>%
+  add_predictions(biden_lm) %>%
+  add_residuals(biden_lm) %>%
+  ggplot(aes(pred, resid)) +
+  geom_point(alpha = .2) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  geom_quantile(method = "rqss", lambda = 5, quantiles = c(.05, .95)) +
+  labs(title = "Biden variance of error terms",
+       x = "Predicted values",
+       y = "Residuals")
+```
+
+* Use Breusch-Pagan test to assess heteroscedasticity of the current `biden_lm` model
+```{r bp test for heteroscedasticity}
+bptest(biden_lm)
+```
+Because the p-value is 0.00005, which is smaller than $\alpha = 0.05$ significance level, thus we reject $H_0$ of homoscedasticity and thus heteroscedasticity is present.
+
+When heteroscedasticity is present, OLS is not optimal because it would still give equal weight to all observations when, in fact, observations with larger disturbance variance contain less information than observations with smaller disturbance variance. Thus, standard errors are also biased when heteroskedasticity is present. This in turn leads to bias in test statistics and confidence intervals.
+
+__4. Test for multicollinearity. If present, propose if/how to solve the problem.__
+* To test for multicollinearity, use variance inflation factor (vif)
+```{r vif biden_lm}
+vif(biden_lm)
+```
+In conclusion, because the vif statistics for all three variables are less then 10, thus we can claim that there is not potential multicolinearity.
+
+* To test of pair-wise collinearity by using a scatterplot matrix
+```{r scatterplot matrix func}
+cormat_heatmap <- function(data){
+  # generate correlation matrix
+  cormat <- round(cor(data), 2)
+  
+  # melt into a tidy table
+  get_upper_tri <- function(cormat){
+    cormat[lower.tri(cormat)]<- NA
+    return(cormat)
+  }
+  
+  upper_tri <- get_upper_tri(cormat)
+  
+  # reorder matrix based on coefficient value
+  reorder_cormat <- function(cormat){
+    # Use correlation between variables as distance
+    dd <- as.dist((1-cormat)/2)
+    hc <- hclust(dd)
+    cormat <-cormat[hc$order, hc$order]
+  }
+  
+  cormat <- reorder_cormat(cormat)
+  upper_tri <- get_upper_tri(cormat)
+  
+  # Melt the correlation matrix
+  melted_cormat <- reshape2::melt(upper_tri, na.rm = TRUE)
+  
+  # Create a ggheatmap
+  ggheatmap <- ggplot(melted_cormat, aes(Var2, Var1, fill = value))+
+    geom_tile(color = "white")+
+    scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                         midpoint = 0, limit = c(-1,1), space = "Lab", 
+                         name="Pearson\nCorrelation") +
+    theme_minimal()+ # minimal theme
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                     size = 12, hjust = 1))+
+    coord_fixed()
+  
+  # add correlation values to graph
+  ggheatmap + 
+    geom_text(aes(Var2, Var1, label = value), color = "black", size = 4) +
+    theme(
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank(),
+      panel.grid.major = element_blank(),
+      panel.border = element_blank(),
+      panel.background = element_blank(),
+      axis.ticks = element_blank(),
+      legend.position = "bottom")
+}
+```
+
+* To check pair-wise collinearity
+```{r collinearity}
+cormat_heatmap(select_if(biden_df, is.numeric))
+```
+
+In conclusion, there is also no significant collinearity among pairwie variables.
+
+If multicollinearity present, we could try to solve the problem by: adding more data to decrease standard error, transform the covariates, and to use shrinkage methods.
+
+# Part II. Interaction terms
+
+__1. Evaluate the marginal effect of age on Joe Biden thermometer rating, conditional on education. Consider the magnitude and direction of the marginal effect, as well as its statistical significance.__
+* Regress `age`, `educ`, and their interaction term on `biden`
+```{r model interaction age educ}
+biden_interaction = lm(biden ~ age * educ, data = biden_df)
+tidy(biden_interaction)
+```
+
+* Compose a function to get point estimates and standard errors
+```{r instant effect}
+instant_effect <- function(model, mod_var){
+  # get interaction term name
+  int.name <- names(model$coefficients)[[which(str_detect(names(model$coefficients), ":"))]]
+  
+  marg_var <- str_split(int.name, ":")[[1]][[which(str_split(int.name, ":")[[1]] != mod_var)]]
+  
+  # store coefficients and covariance matrix
+  beta.hat <- coef(model)
+  cov <- vcov(model)
+  
+  # possible set of values for mod_var
+  if(class(model)[[1]] == "lm"){
+    z <- seq(min(model$model[[mod_var]]), max(model$model[[mod_var]]))
+  } else {
+    z <- seq(min(model$data[[mod_var]]), max(model$data[[mod_var]]))
+  }
+  
+  # calculate instantaneous effect
+  dy.dx <- beta.hat[[marg_var]] + beta.hat[[int.name]] * z
+  
+  # calculate standard errors for instantaeous effect
+  se.dy.dx <- sqrt(cov[marg_var, marg_var] +
+                     z^2 * cov[int.name, int.name] +
+                     2 * z * cov[marg_var, int.name])
+  
+  # combine into data frame
+  data_frame(z = z,
+             dy.dx = dy.dx,
+             se = se.dy.dx)
+}
+```
+
+* Plot the marginal effect of age
+```{r marginal effect of age}
+instant_effect(biden_interaction, "educ") %>%
+  ggplot(aes(z, dy.dx,
+             ymin = dy.dx - 1.96 * se,
+             ymax = dy.dx + 1.96 * se)) +
+  geom_pointrange() +
+  geom_hline(yintercept = 0, linetype = 2) +
+  labs(title = "Marginal effect of Age",
+       subtitle = "Conditioning on Education",
+       x = "Education",
+       y = "Estimated marginal effect")
+```
+
+The plot above shows the marginal effect of age, conditioning on education, and its confidence interval. According to the marginal effect plot, it can be observed that marginal effect of age is positive if the observation has less than 14 years of education and is negative if the observation has more than 14 years of education. 
+
+* To test the significance of marginal effect, conduct hypothesis testing on our estimates 
+```{r hypothesis testing on interaction}
+linearHypothesis(biden_interaction, "age + age:educ")
+```
+As shown above, because the p-value is 0.00008, which is less than 5% significance level, thus we can claim the marginal effect of age is statistically significant.
+
+__2. Evaluate the marginal effect of education on Joe Biden thermometer rating, conditional on age. Consider the magnitude and direction of the marginal effect, as well as its statistical significance.__
+* Plot the marginal effect of education
+```{r marginal effect of education}
+instant_effect(biden_interaction, "age") %>%
+  ggplot(aes(z, dy.dx,
+             ymin = dy.dx - 1.96 * se,
+             ymax = dy.dx + 1.96 * se)) +
+  geom_pointrange() +
+  geom_hline(yintercept = 0, linetype = 2) +
+  labs(title = "Marginal effect of Education",
+       subtitle = "Conditioning on Age",
+       x = "Age",
+       y = "Estimated marginal effect")
+```
+
+The plot above shows the marginal effect of education, conditioning on age, and its confidence interval. According to the marginal effect plot, it can be observed that marginal effect of education is positive if the observation is less than 35 years old and is negative if the observation is more than 35 years old. 
+
+* To test the significance of marginal effect, conduct hypothesis testing on our estimates 
+```{r hypothesis testing on interaction education}
+linearHypothesis(biden_interaction, "educ + age:educ")
+```
+As shown above, because the p-value is 0.022, which is less than 5% significance level, thus we can claim the marginal effect of age is statistically significant.
+
+# Part III. Missing data
+
+__1. Estimate the following linear regression model of attitudes towards Joseph Biden:__
+
+$$Y = \beta_0 + \beta_1X_1 + \beta_2X_2 + \beta_3X_3$$
+
+__where Y is the Joe Biden feeling thermometer, X1 is age, X2 is gender, and X3 is education. This time, use multiple imputation to account for the missingness in the data. Consider the multivariate normality assumption and transform any variables as you see fit for the imputation stage. Calculate appropriate estimates of the parameters and the standard errors and explain how the results differ from the original, non-imputed model.__
+
+* load `biden` dataset again without removing NAs
+```{r load biden with na}
+biden = read.csv("biden.csv") %>%
+  mutate(female = factor(female))
+```
+
+* Regress `age`, `female`, and `educ` on `biden`
+```{r imputation regression}
+biden_MIA = lm(biden ~ age + female + educ, data = biden)
+tidy(biden_MIA)
+```
+
+* Find the number of missing data
+```{r see missing data}
+biden %>%
+  select(biden, age, female, educ) %>%
+  summarize_all(funs(sum(is.na(.)))) %>%
+  knitr::kable()
+```
+
+* So want to check which variables are highly correlated with age and educ so as to include in the imputation model
+```{r check correlation}
+biden %>%
+  select(biden, age, educ) %>%
+  GGally::ggpairs(select_if(., is.numeric))
+```
+
+* We can see `age` and `educ` are clearly not normally distributed, so transform those variables when imputation
+```{r transform}
+biden_transform = biden %>%
+  mutate(age = age,
+         power_educ = educ^2)
+```
+
+* show correlation of transformed variables
+```{r transformed variable correlation}
+biden_transform %>%
+  select(biden, age, power_educ) %>%
+  GGally::ggpairs(select_if(., is.numeric))
+```
+
+* Use multiple imputation to account for the missingness in the data
+```{r multiple imputation}
+biden.out <- amelia(as.data.frame(biden_transform), m = 5, 
+                    idvars = c("female", "dem", "rep", "educ", "age"))
+```
+
+* Now checking out what the new model is like
+```{r see new model is like}
+models_trans_imp <- data_frame(data = biden.out$imputations) %>%
+  mutate(model = map(data, ~ lm(biden ~ age + power_educ + female,
+                                data = .x)),
+         coef = map(model, tidy)) %>%
+  unnest(coef, .id = "id")
+
+models_trans_imp
+```
+
+* To aggregrate the result, create a function called
+```{r create aggregate function}
+mi.meld.plus <- function(df_tidy){
+  # transform data into appropriate matrix shape
+  coef.out <- df_tidy %>%
+    select(id:estimate) %>%
+    spread(term, estimate) %>%
+    select(-id)
+  
+  se.out <- df_tidy %>%
+    select(id, term, std.error) %>%
+    spread(term, std.error) %>%
+    select(-id)
+  
+  combined.results <- mi.meld(q = coef.out, se = se.out)
+  
+  data_frame(term = colnames(combined.results$q.mi),
+             estimate.mi = combined.results$q.mi[1, ],
+             std.error.mi = combined.results$se.mi[1, ])
+}
+
+(biden_imputed = mi.meld.plus(models_trans_imp))
+```
+
+* Now compare the imputed model with nonimputed model. 
+    + left side: non-imputed model
+    + right: imputed model
+```{r comparison models}
+tidy(biden_MIA) %>%
+  select(term, estimate, std.error)%>%
+  cbind(biden_imputed)
+```
+In conclusion, it could be shown from the table of comparison above, conducting imputation after putting a power transformation on the `educ` variable for the sake of the normality assumption and then comparing the result with the non-imputed model, it could be seen that except `female`'s coefficient and standard error remains almost identical, the rest of the coefficients reduced and the standard error of those coefficients are also reduced. 
